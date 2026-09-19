@@ -1,5 +1,5 @@
 ---
-name: open-code-review
+name: cr
 description: >
   Performs AI-powered code review on Git changes using the `ocr` CLI from
   alibaba/open-code-review. Use when the user asks to review code, review
