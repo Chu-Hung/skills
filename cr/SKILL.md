@@ -26,122 +26,62 @@ A skill for invoking [open-code-review](https://github.com/alibaba/open-code-rev
 
 ## Workflow
 
-### Step 0: Handle PR Input and Select Context Mode
+### Step 0: Select Review Context and Target
 
-When the harness input is a pull request, first read the PR body and identify
-linked issues, if any. Use the PR body and linked issue descriptions to extract
-task background, requirements, acceptance criteria, constraints, and references
-to relevant specs.
+There are two context modes:
 
-For PR input, identify the PR head branch, target/base branch, and repository.
-Locate the worktree for the PR head branch. In workspace mode it is commonly
-under `/wt` at the workspace root, but verify the actual path and branch rather
-than assuming a fixed directory name.
+- **Standalone mode**: review the current workspace or explicitly requested
+  target using the normal flow. Do not load specs/docs into the OCR prompt.
+- **Workspace mode**: use when the selected workspace/worktree contains relevant
+  root-level `specs/` or `docs/` directories. These files are reserved for
+  post-review verification; do not pass them to OCR as initial background.
 
-If the PR worktree exists, use it as the review repository and compare the PR
-head branch with the target branch. Select `Workspace` mode when that worktree
-contains a relevant root-level `specs/` or `docs/` directory; otherwise use
-`Standalone` mode for context loading while still reviewing the PR branches.
+When the harness input is a pull request:
 
-In `Workspace` mode, use the selected or combined context file:
+1. Read the PR body, linked issues (if any), and existing review comments (if
+   any). Summarize their task background, requirements, acceptance criteria,
+   constraints, and unresolved review concerns into concise business context.
+2. Identify the PR head branch, target/base branch, and repository.
+3. Locate the PR head worktree, commonly under `/wt` at the workspace root. Verify
+   the actual path and checked-out branch instead of assuming a fixed directory.
+4. If the worktree exists, review the PR head against the target branch from that
+   worktree. Choose `Workspace` or `Standalone` based on whether relevant
+   `specs/` or `docs/` directories exist there.
+5. If the worktree cannot be found, fall back to Standalone mode. Do not assume
+   the current checkout represents the PR branch.
 
-```bash
-ocr review --audience agent \
-  --repo <pr-worktree> \
-  --from <target-branch> \
-  --to <pr-head-branch> \
-  --background-file <context-file>
-```
-
-Inspect the worktree's `specs/` and `docs/` directories for files relevant to the
-PR. Combine PR context, linked issue context, and relevant spec files when more
-than one source is needed. In `Standalone` mode, use the PR body and linked issue
-context as the available business context:
-
-```bash
-ocr review --audience agent \
-  --repo <pr-worktree> \
-  --from <target-branch> \
-  --to <pr-head-branch> \
-  --background "<PR body and linked issue context>"
-```
-
-If the PR worktree cannot be found, fall back to the normal Standalone flow. Do
-not assume the current checkout represents the PR branch.
-
-When the input identifies a local branch rather than a PR, apply the same
-worktree handling:
+When the input identifies a local branch rather than a PR:
 
 1. Identify the branch to review and its target/base branch.
-2. If the target branch is not provided, stop and ask the user which target
-   branch the input branch should be reviewed against. Do not guess `main`,
-   `master`, or another default.
-3. Locate the worktree for the input branch, commonly under `/wt`. If it exists,
-   use that worktree and compare the input branch with the requested target:
+2. If the target branch is not provided, stop and ask which target branch the
+   input branch should be reviewed against. Do not guess `main`, `master`, or
+   another default.
+3. Locate the input branch worktree, commonly under `/wt`. If it exists, review
+   the input branch against the requested target from that worktree, then choose
+   `Workspace` or `Standalone` based on its relevant `specs/` or `docs/` files.
+4. If no matching worktree exists, fall back to Standalone mode and do not assume
+   the current checkout is the input branch.
 
-   ```bash
-   ocr review --audience agent \
-     --repo <branch-worktree> \
-     --from <target-branch> \
-     --to <input-branch> \
-     [--background-file <context-file>]
-   ```
-
-4. Select `Workspace` or `Standalone` context handling based on the files in the
-   branch worktree. If no matching worktree exists, fall back to the normal
-   Standalone flow and do not assume the current checkout is the input branch.
-
-For non-PR input, or after the PR worktree fallback, inspect the current workspace
-for root-level `specs/` and `docs/` directories.
-
-- **Standalone mode**: if neither directory exists, use the existing review flow
-  and gather concise business context from the review request, target, and diff.
-- **Workspace mode**: if either directory exists, identify the spec/document files
-  relevant to both the user's task and the code being reviewed. Prefer targeted
-  files over loading the entire directory. Include requirements, API contracts,
-  acceptance criteria, design constraints, and compatibility notes when they are
-  relevant. Ignore unrelated documentation.
-
-In workspace mode, pass the selected context to `ocr review` as follows:
-
-- If one relevant file is found, pass it directly with
-  `--background-file <path>`.
-- If multiple relevant files are found, combine them into one Markdown file and
-  pass that file with `--background-file`:
-
-  ```bash
-  {
-    echo '# Task spec'
-    cat docs/overview.md
-    echo '\n# API contract'
-    cat docs/api.md
-    echo '\n# Acceptance criteria'
-    cat docs/acceptance.md
-  } > /tmp/review-context.md
-  ```
-
-  Replace the example paths and section headings with the actual relevant files.
-
-- If the workspace contains `specs/` or `docs/` but no relevant files can be
-  identified, run the review without additional background context and note that
-  no matching specs were found.
-
-The combined context should be focused enough to fit the review prompt budget.
-Use `--max-tokens` or `--max-tokens-budget` when the task requires a large spec.
-`--background-file` takes precedence over `--background`; do not pass both unless
-there is a specific reason.
+For all other requests, inspect the current workspace for root-level `specs/` and
+`docs/` directories to select `Workspace` or `Standalone` mode. In either mode,
+build the initial OCR background from the user request, task details, and any
+available PR/Issue context—not from the full specs/docs.
 
 ### Step 1: Gather Business Context
 
-Analyze the review target (commits, branch, or changes) to extract concise business context. Pass this context via `--background` to improve review quality.
+Summarize business context before running OCR and pass it via `--background` by
+default. For PR input, base the summary on the PR body, linked issue bodies, and
+existing PR review comments. For local branch or workspace input, use the user
+request and available task context. Keep the summary focused; do not paste full
+specs/docs or full review threads.
 
 ### Step 2: Run Code Review
 
 **Do not pre-check whether `ocr` is installed** — skip probes like `command -v ocr` or `ocr --version`. Assume the CLI is available and run the review directly; that saves a tool call on the common path. Only if the review fails with `command not found` should you install it per Troubleshooting.
 
-Run the OCR command with appropriate flags. **Always pass review context via
-`--background-file` in workspace mode when relevant files were found. In
-standalone mode, pass business context via `--background` when available.**
+Run the OCR command with appropriate flags. **Always pass the summarized business
+context via `--background` by default. Do not use `--background-file` for
+specs/docs in the initial review.**
 
 ```bash
 ocr review --audience agent --background "business context here" [user-args]
@@ -163,9 +103,9 @@ ocr review --audience agent --background "business context here" [user-args]
 
 | User says                                       | Command to run                                                                                                                                                |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| "review my changes" / "review the working copy" | `ocr review --audience agent -b "context"` (standalone) or `--background-file <context-file>` (workspace)                                                     |
-| "review this PR" / "review feature branch"      | `ocr review --audience agent -b "context" --from main --to <branch>` (standalone) or `--background-file <context-file> --from main --to <branch>` (workspace) |
-| "review commit abc123"                          | `ocr review --audience agent -b "context" --commit abc123` (standalone) or `--background-file <context-file> --commit abc123` (workspace)                     |
+| "review my changes" / "review the working copy" | `ocr review --audience agent --background "context"`                                                  |
+| "review this PR" / "review feature branch"      | `ocr review --audience agent --background "PR/Issue summary" --from main --to <branch>`               |
+| "review commit abc123"                          | `ocr review --audience agent --background "context" --commit abc123`                                  |
 | "what would be reviewed?" (dry-run)             | `ocr review --preview`                                                                                                                                        |
 
 **Output mode:**
@@ -175,11 +115,32 @@ ocr review --audience agent --background "business context here" [user-args]
 
 **On failure:** If `ocr review` exits non-zero (e.g. an LLM connection error), do not retry blindly — consult the Troubleshooting section below for the matching fix before re-running.
 
-### Step 3: Report
+### Step 3: Verify Findings Against Specs and Docs
+
+After OCR returns findings, and before reporting or applying fixes, perform a
+separate verification pass against relevant `specs/` and `docs/` files in the
+selected workspace/worktree. This pass is intentionally outside the initial OCR
+prompt to keep review context small.
+
+For each finding:
+
+- Check whether the finding is valid under the applicable requirements,
+  acceptance criteria, API contracts, and design constraints.
+- Mark findings that are invalid or contradicted by the specs/docs as rejected,
+  with a short reason.
+- Refine the severity or recommendation when the specs/docs provide more precise
+  constraints.
+- Identify material issues in the changed code that OCR missed when the specs/docs
+  clearly require them.
+
+If no relevant specs/docs exist, skip this verification pass and report the OCR
+findings as-is, noting that no specification cross-check was available.
+
+### Step 4: Report
 
 OCR output includes structured `severity` (critical / high / medium / low) and `category` (bug / security / performance / maintainability / test / style / documentation / other) on each comment. Present results grouped by severity, discarding `low` severity items that are likely false positives or nitpicks.
 
-### Step 4: Fix
+### Step 5: Fix
 
 Before applying fixes, check whether the user requested automatic fixes:
 
