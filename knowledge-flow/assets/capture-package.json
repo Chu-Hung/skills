@@ -1,0 +1,13 @@
+{
+  "name": "workspace-spec-tools",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Local tools for workspace spec maintenance — design canvas screenshot capture.",
+  "scripts": {
+    "capture": "node capture-design-canvas.mjs"
+  },
+  "dependencies": {
+    "puppeteer": "^24.0.0"
+  }
+}
