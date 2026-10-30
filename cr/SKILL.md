@@ -28,44 +28,105 @@ A skill for invoking [open-code-review](https://github.com/alibaba/open-code-rev
 
 ### Step 0: Select Review Context and Target
 
-There are two context modes:
+#### 0.1 Detect the mode from the review target's location
 
-- **Standalone mode**: review the current workspace or explicitly requested
-  target using the normal flow. Do not load specs/docs into the OCR prompt.
-- **Workspace mode**: use when the selected workspace/worktree contains relevant
-  root-level `specs/` or `docs/` directories. These files are reserved for
-  post-review verification; do not pass them to OCR as initial background.
+The mode depends on **where the review target lives**, not on what is at the
+root of the current checkout. Real workspaces (e.g. `~/Workspace/tcg-go`,
+`~/Workspace/b06`) look like this:
+
+```
+<workspace>/            # NOT a git repo
+├── service/ mobile/ admin/ ...   # each its own git repo
+├── specs/                        # git repo: living specs + version snapshots
+├── docs -> Google Drive ...      # symlink: PM/design sources
+├── .worktree/<repo>-<n>/         # worktrees of the repos above
+└── .task-flow, AGENTS.md -> ...  # optional workspace config
+```
+
+Because `specs/` and `docs/` sit **above** the repo being reviewed, checking the
+checkout root always yields Standalone. Instead, walk **up** from the review
+target (the PR/branch worktree if one was found, otherwise the current
+directory or `--repo` path) to the nearest ancestor that is not a Git checkout
+but has `specs/` or `docs/`:
+
+```bash
+d=$(cd "$TARGET" && pwd)
+WS=""
+while [ "$d" != "/" ] && [ "$d" != "$HOME" ]; do
+  # -e: `.git` is a file inside worktrees; -d follows the `docs` symlink
+  if [ ! -e "$d/.git" ] && { [ -d "$d/specs" ] || [ -d "$d/docs" ]; }; then WS=$d; break; fi
+  d=$(dirname "$d")
+done
+```
+
+- `WS` set → **Workspace mode**. `$WS/specs` and `$WS/docs` are the
+  verification sources for Step 3.
+- `WS` empty → **Standalone mode**: a single repo with no enclosing workspace.
+  Step 3 uses only that repo's own `specs/`/`docs/` if present.
+
+Do not rely on `WORKSPACE.md` (missing or empty in existing workspaces) or on
+the checkout's top-level directory listing. Both modes treat `specs/`/`docs/`
+the same way during review: they are reserved for post-review verification and
+are never passed to OCR as initial background.
+
+#### 0.2 Resolve the repository and worktree
+
+In Workspace mode the workspace holds several repos, so first decide which one
+is reviewed:
+
+- **PR input**: map the PR's repository to a child directory by comparing its
+  name with `git -C <child> remote get-url origin` for each child repo
+  (`TEAM_REPOS` in `<workspace>/.task-flow`, if present, lists the repo names;
+  e.g. `tcggo_backend` → `service/`).
+- **Branch input**: use the repo the user names; otherwise the repo containing
+  the current directory.
+- **No target given, cwd is the workspace root** (not a Git repo, so a bare
+  `ocr review` fails): run `git -C <child> status --porcelain` per child repo
+  and review each repo that has changes separately with `--repo <child>`. If
+  none has changes, ask what to review.
+
+Find worktrees with `git -C <repo> worktree list` — authoritative, no guessing.
+Worktrees usually live under `<workspace>/.worktree/` or
+`<repo>/.worktrees/<branch>/`. Verify the checked-out branch matches the target
+before using one. A detached HEAD or different branch is not a match.
+
+#### 0.3 Resolve the review target
 
 When the harness input is a pull request:
 
 1. Read the PR body, linked issues (if any), and existing review comments (if
    any). Summarize their task background, requirements, acceptance criteria,
    constraints, and unresolved review concerns into concise business context.
-2. Identify the PR head branch, target/base branch, and repository.
-3. Locate the PR head worktree, commonly under `/wt` at the workspace root. Verify
-   the actual path and checked-out branch instead of assuming a fixed directory.
-4. If the worktree exists, review the PR head against the target branch from that
-   worktree. Choose `Workspace` or `Standalone` based on whether relevant
-   `specs/` or `docs/` directories exist there.
-5. If the worktree cannot be found, fall back to Standalone mode. Do not assume
-   the current checkout represents the PR branch.
+2. Identify the PR head branch, target/base branch, and repository. The review
+   target is always the PR's own base branch on `origin`: for a PR
+   `fix/abc -> develop`, review `fix/abc` against `origin/develop`
+   (`--from origin/develop --to fix/abc`). Never substitute `main`, `master`,
+   or a local (non-`origin/`) base ref.
+3. Locate the PR head worktree (0.2). Do not assume a fixed directory.
+4. If the worktree exists, run the review from it (`--repo <worktree>`) against
+   `origin/<base>`, and detect the mode (0.1) from the worktree path.
+5. If the worktree cannot be found, review from the repo's main clone using
+   `--from origin/<base> --to <head>` (fetch first if the head is not local),
+   and detect the mode from that repo path. Do not assume the current checkout
+   represents the PR branch. Never fall back to Standalone just because no
+   worktree exists.
 
 When the input identifies a local branch rather than a PR:
 
 1. Identify the branch to review and its target/base branch.
 2. If the target branch is not provided, stop and ask which target branch the
    input branch should be reviewed against. Do not guess `main`, `master`, or
-   another default.
-3. Locate the input branch worktree, commonly under `/wt`. If it exists, review
-   the input branch against the requested target from that worktree, then choose
-   `Workspace` or `Standalone` based on its relevant `specs/` or `docs/` files.
-4. If no matching worktree exists, fall back to Standalone mode and do not assume
-   the current checkout is the input branch.
+   another default (`BASE_BRANCH` in `.task-flow` is a hint to suggest, not an
+   answer).
+3. Locate the input branch worktree (0.2). If it exists, review the input branch
+   against the requested target from that worktree; otherwise use the repo's
+   main clone with `--from <target> --to <branch>`. Detect the mode (0.1) from
+   that path.
 
-For all other requests, inspect the current workspace for root-level `specs/` and
-`docs/` directories to select `Workspace` or `Standalone` mode. In either mode,
-build the initial OCR background from the user request, task details, and any
-available PR/Issue context—not from the full specs/docs.
+For all other requests (working-copy review), detect the mode from the current
+directory. In either mode, build the initial OCR background from the user
+request, task details, and any available PR/Issue context — not from the full
+specs/docs.
 
 ### Step 1: Gather Business Context
 
@@ -104,7 +165,8 @@ ocr review --audience agent --background "business context here" [user-args]
 | User says                                       | Command to run                                                                                                                                                |
 | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | "review my changes" / "review the working copy" | `ocr review --audience agent --background "context"`                                                  |
-| "review this PR" / "review feature branch"      | `ocr review --audience agent --background "PR/Issue summary" --from main --to <branch>`               |
+| "review this PR" (base `<base>`, head `<head>`) | `ocr review --audience agent --background "PR/Issue summary" --from origin/<base> --to <head>`        |
+| "review feature branch"                         | `ocr review --audience agent --background "context" --from <target> --to <branch>`                    |
 | "review commit abc123"                          | `ocr review --audience agent --background "context" --commit abc123`                                  |
 | "what would be reviewed?" (dry-run)             | `ocr review --preview`                                                                                                                                        |
 
@@ -118,9 +180,28 @@ ocr review --audience agent --background "business context here" [user-args]
 ### Step 3: Verify Findings Against Specs and Docs
 
 After OCR returns findings, and before reporting or applying fixes, perform a
-separate verification pass against relevant `specs/` and `docs/` files in the
-selected workspace/worktree. This pass is intentionally outside the initial OCR
-prompt to keep review context small.
+separate verification pass against relevant `specs/` and `docs/` files. This
+pass is intentionally outside the initial OCR prompt to keep review context
+small.
+
+Where to look depends on the mode from Step 0.1:
+
+- **Workspace mode**: `$WS/specs` and `$WS/docs`. Read selectively — never
+  load whole directories (`docs` is a Google Drive symlink and can be huge).
+  - Start from the spec index: `specs/current/current-index.md` or
+    `specs/versions.md` / `specs/versions/<version>/<version>-index.md`
+    (layout varies per workspace; list `$WS/specs` first).
+  - Pick the version/feature from the PR, linked issue, milestone, or branch
+    name; use `specs/current/` for behavior that already shipped and the
+    matching version snapshot for the change being reviewed.
+  - Narrow to the reviewed repo's specs (e.g. `current/service/`, API/DB design
+    files) before reading anything in `docs/`. Use `docs/` only for PM/design
+    sources the specs defer to.
+  - Search `docs/` with symlink-following flags (`rg -L`, `find -L`); plain
+    `rg`/`find` skip symlinks and return nothing.
+  - If the PR itself is in the `specs` repo, verify against the specs in the
+    PR's worktree, not the main clone.
+- **Standalone mode**: the repo's own `specs/`/`docs/` if present.
 
 For each finding:
 
@@ -151,7 +232,9 @@ When the review target is a PR or local branch with a matching worktree, apply
 approved fixes in that target branch's worktree (`<pr-worktree>` or
 `<branch-worktree>`). Verify the worktree path and checked-out branch before
 editing. Never apply those fixes in the current checkout or target/base branch by
-accident. If no matching worktree exists, follow the normal standalone fix flow.
+accident. If no matching worktree exists, do not edit the main clone's checked-out
+branch; report the fixes as suggestions, or ask whether to create a worktree
+(`git -C <repo> worktree add`) for the target branch.
 
 When fixing issues and suggestions:
 
@@ -269,7 +352,7 @@ Beyond the common flags above, `ocr review` exposes a few groups of controls. Ru
 ## Gotchas
 
 - **LLM must be configured first** — `ocr review` will fail loudly if no LLM is reachable. See the Troubleshooting section below if this happens.
-- **Working directory matters** — `ocr review` operates on the Git repo at the current directory. Use `--repo /path/to/repo` to run from elsewhere.
+- **Working directory matters** — `ocr review` operates on the Git repo at the current directory. Use `--repo /path/to/repo` to run from elsewhere. A workspace root is not a Git repo, so always pass `--repo <child-repo-or-worktree>` there.
 - **Untracked files are reviewed in workspace mode** — running bare `ocr review` includes staged, unstaged, _and_ untracked changes. Stage selectively if you want narrower scope.
 - **Large diffs may hit token limits** — `MAX_TOKENS` sets the prompt budget (`200000` in the review template; `ocr scan` uses `58888`); conversation context is compressed to stay within this prompt budget. Model output is capped separately by `MAX_COMPLETION_TOKENS` (`16384`). A file whose diff alone exceeds ~80% of `MAX_TOKENS` is skipped before the LLM is called.
 - **Plan phase triggers on either of two thresholds** — a group runs an extra risk-analysis phase before main review when its largest changed file reaches `PLAN_MODE_LINE_THRESHOLD` (default `50`) **or** it holds 2+ files whose combined changed lines reach `PLAN_MODE_GROUP_LINE_THRESHOLD` (default `100`). This adds latency but improves quality.
